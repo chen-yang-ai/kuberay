@@ -238,13 +238,18 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 			break
 		}
 
+		var rayClusterInstance *rayv1.RayCluster
+		// TODO (kevin85421): Maybe we only need to `get` the RayCluster because the RayCluster should have been created
+		// before transitioning the status from `Initializing` to `Running`.
+		if rayClusterInstance, err = r.getOrCreateRayClusterInstance(ctx, rayJobInstance); err != nil {
+			return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
+		}
+
 		job := &batchv1.Job{}
+		var isSubmitterFinished bool
 		if rayJobInstance.Spec.SubmissionMode == rayv1.K8sJobMode {
 			// If the submitting Kubernetes Job reaches the backoff limit, transition the status to `Complete` or `Failed`.
 			// This is because, beyond this point, it becomes impossible for the submitter to submit any further Ray jobs.
-			// For light-weight mode, we don't transition the status to `Complete` or `Failed` based on the number of failed
-			// requests. Instead, users can use the `ActiveDeadlineSeconds` to ensure that the RayJob in the light-weight
-			// mode is not stuck in the `Running` status indefinitely.
 			namespacedName := common.RayJobK8sJobNamespacedName(rayJobInstance)
 			if err := r.Client.Get(ctx, namespacedName, job); err != nil {
 				logger.Error(err, "Failed to get the submitter Kubernetes Job for RayJob", "NamespacedName", namespacedName)
@@ -253,13 +258,7 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 			if shouldUpdate := checkK8sJobAndUpdateStatusIfNeeded(ctx, rayJobInstance, job); shouldUpdate {
 				break
 			}
-		}
-
-		var rayClusterInstance *rayv1.RayCluster
-		// TODO (kevin85421): Maybe we only need to `get` the RayCluster because the RayCluster should have been created
-		// before transitioning the status from `Initializing` to `Running`.
-		if rayClusterInstance, err = r.getOrCreateRayClusterInstance(ctx, rayJobInstance); err != nil {
-			return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
+			_, isSubmitterFinished = utils.IsJobFinished(job)
 		}
 
 		// Check the current status of ray jobs
@@ -271,14 +270,23 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 		jobInfo, err := rayDashboardClient.GetJobInfo(ctx, rayJobInstance.Status.JobId)
 		if err != nil {
 			// If the Ray job was not found, GetJobInfo returns a BadRequest error.
-			if rayJobInstance.Spec.SubmissionMode == rayv1.HTTPMode && errors.IsBadRequest(err) {
-				logger.Info("The Ray job was not found. Submit a Ray job via an HTTP request.", "JobId", rayJobInstance.Status.JobId)
-				if _, err := rayDashboardClient.SubmitJob(ctx, rayJobInstance); err != nil {
-					logger.Error(err, "Failed to submit the Ray job", "JobId", rayJobInstance.Status.JobId)
-					return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
+			if errors.IsBadRequest(err) {
+				if rayJobInstance.Spec.SubmissionMode == rayv1.HTTPMode {
+					logger.Info("The Ray job was not found. Submit a Ray job via an HTTP request.", "JobId", rayJobInstance.Status.JobId)
+					if _, err := rayDashboardClient.SubmitJob(ctx, rayJobInstance); err != nil {
+						logger.Error(err, "Failed to submit the Ray job", "JobId", rayJobInstance.Status.JobId)
+						return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
+					}
+					return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, nil
 				}
-				return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, nil
+				if isSubmitterFinished {
+					rayJobInstance.Status.JobDeploymentStatus = rayv1.JobDeploymentStatusFailed
+					rayJobInstance.Status.Reason = rayv1.AppFailed
+					rayJobInstance.Status.Message = "Submitter completed but Ray job not found in RayCluster."
+					break
+				}
 			}
+
 			logger.Error(err, "Failed to get job info", "JobId", rayJobInstance.Status.JobId)
 			return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
 		}
