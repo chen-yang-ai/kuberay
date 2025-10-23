@@ -238,18 +238,14 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 			break
 		}
 
-		var rayClusterInstance *rayv1.RayCluster
-		// TODO (kevin85421): Maybe we only need to `get` the RayCluster because the RayCluster should have been created
-		// before transitioning the status from `Initializing` to `Running`.
-		if rayClusterInstance, err = r.getOrCreateRayClusterInstance(ctx, rayJobInstance); err != nil {
-			return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
-		}
-
 		job := &batchv1.Job{}
 		var isSubmitterFinished bool
 		if rayJobInstance.Spec.SubmissionMode == rayv1.K8sJobMode {
 			// If the submitting Kubernetes Job reaches the backoff limit, transition the status to `Complete` or `Failed`.
 			// This is because, beyond this point, it becomes impossible for the submitter to submit any further Ray jobs.
+			// For light-weight mode, we don't transition the status to `Complete` or `Failed` based on the number of failed
+			// requests. Instead, users can use the `ActiveDeadlineSeconds` to ensure that the RayJob in the light-weight
+			// mode is not stuck in the `Running` status indefinitely.
 			namespacedName := common.RayJobK8sJobNamespacedName(rayJobInstance)
 			if err := r.Client.Get(ctx, namespacedName, job); err != nil {
 				logger.Error(err, "Failed to get the submitter Kubernetes Job for RayJob", "NamespacedName", namespacedName)
@@ -258,7 +254,17 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 			if shouldUpdate := checkK8sJobAndUpdateStatusIfNeeded(ctx, rayJobInstance, job); shouldUpdate {
 				break
 			}
+			// Check if the K8s Job submitter has finished. This will be used later to detect zombie clusters.
+			// Note: In future versions (post-v1.4.2), this logic is encapsulated in checkSubmitterAndUpdateStatusIfNeeded()
+			// which also calls utils.IsJobFinished() internally along with additional checks for SidecarMode.
 			_, isSubmitterFinished = utils.IsJobFinished(job)
+		}
+
+		var rayClusterInstance *rayv1.RayCluster
+		// TODO (kevin85421): Maybe we only need to `get` the RayCluster because the RayCluster should have been created
+		// before transitioning the status from `Initializing` to `Running`.
+		if rayClusterInstance, err = r.getOrCreateRayClusterInstance(ctx, rayJobInstance); err != nil {
+			return ctrl.Result{RequeueAfter: RayJobDefaultRequeueDuration}, err
 		}
 
 		// Check the current status of ray jobs
