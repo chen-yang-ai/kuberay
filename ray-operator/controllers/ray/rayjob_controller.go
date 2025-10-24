@@ -257,7 +257,7 @@ func (r *RayJobReconciler) Reconcile(ctx context.Context, request ctrl.Request) 
 			// Check if the K8s Job submitter has finished. This will be used later to detect zombie clusters.
 			// Note: In future versions (post-v1.4.2), this logic is encapsulated in checkSubmitterAndUpdateStatusIfNeeded()
 			// which also calls utils.IsJobFinished() internally along with additional checks for SidecarMode.
-			_, isSubmitterFinished = utils.IsJobFinished(job)
+			_, isSubmitterFinished := utils.IsJobFinished(job) 
 		}
 
 		var rayClusterInstance *rayv1.RayCluster
